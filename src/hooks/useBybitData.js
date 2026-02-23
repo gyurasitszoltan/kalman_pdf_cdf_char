@@ -6,7 +6,7 @@ const WS_URL = 'wss://stream.bybit.com/v5/public/linear';
 const PING_INTERVAL = 20000;
 const MAX_RECONNECT_DELAY = 30000;
 const GAP_THRESHOLD_MS = 90000;
-const DEFAULT_WINDOW = 100; // 120 perc = 2 óra
+const DEFAULT_WINDOW = 1*60; // 120 perc = 2 óra
 
 export function useBybitData(symbol, Q, R, windowSize = DEFAULT_WINDOW) {
   const [status, setStatus] = useState('loading');
@@ -16,7 +16,7 @@ export function useBybitData(symbol, Q, R, windowSize = DEFAULT_WINDOW) {
   const [lastPrice, setLastPrice] = useState(null);
   const [normStats, setNormStats] = useState(null);
 
-  const zscoreRef = useRef(new ZScoreNormalizer(windowSize));
+  const zscoreRef = useRef(new ZScoreNormalizer());
   const kalmanRef = useRef(new KalmanFilter1D(Q, R));
   const rawMeasurementsRef = useRef([]);
   const rawPricesRef = useRef([]);
@@ -28,6 +28,7 @@ export function useBybitData(symbol, Q, R, windowSize = DEFAULT_WINDOW) {
   const lastCandleTimeRef = useRef(0);
   const symbolRef = useRef(symbol);
   const mountedRef = useRef(true);
+  const versionRef = useRef(0);
 
   // Rerun Kalman filter when Q/R changes
   useEffect(() => {
@@ -96,6 +97,9 @@ export function useBybitData(symbol, Q, R, windowSize = DEFAULT_WINDOW) {
     };
 
     ws.onmessage = async (event) => {
+      // Stale WS guard: ha közben coin-t váltottunk, eldobjuk
+      if (symbolRef.current !== sym) return;
+
       const msg = JSON.parse(event.data);
       if (!msg.topic || !msg.data) return;
 
@@ -116,6 +120,8 @@ export function useBybitData(symbol, Q, R, windowSize = DEFAULT_WINDOW) {
       // Gap detection: fetch missing candles if needed
       if (lastCandleTimeRef.current > 0 && startTime - lastCandleTimeRef.current > GAP_THRESHOLD_MS) {
         const missing = await fetchMissingCandles(sym, lastCandleTimeRef.current + 60000, startTime);
+        // Recheck after async gap-fill
+        if (symbolRef.current !== sym) return;
         for (const mc of missing) {
           if (mc.start > lastCandleTimeRef.current && mc.start < startTime) {
             processCandle(mc.close, mc.start);
@@ -146,9 +152,10 @@ export function useBybitData(symbol, Q, R, windowSize = DEFAULT_WINDOW) {
   useEffect(() => {
     mountedRef.current = true;
     symbolRef.current = symbol;
+    const version = ++versionRef.current;
 
     // Reset state
-    zscoreRef.current = new ZScoreNormalizer(windowSize);
+    zscoreRef.current = new ZScoreNormalizer();
     kalmanRef.current = new KalmanFilter1D(Q, R);
     rawMeasurementsRef.current = [];
     rawPricesRef.current = [];
@@ -174,6 +181,10 @@ export function useBybitData(symbol, Q, R, windowSize = DEFAULT_WINDOW) {
       try {
         const url = `/api/bybit/v5/market/kline?category=linear&symbol=${symbol}&interval=1&limit=${windowSize}`;
         const res = await fetch(url);
+
+        // Ha közben coin-t váltottunk, eldobjuk a régi fetch eredményét
+        if (versionRef.current !== version) return;
+
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
         if (json.retCode !== 0) throw new Error(json.retMsg || 'Bybit API error');
@@ -190,11 +201,16 @@ export function useBybitData(symbol, Q, R, windowSize = DEFAULT_WINDOW) {
           processCandle(closePrice, startTime);
         }
 
-        if (mountedRef.current) {
+        // Kalibrációs fázis vége: mean/std befagyasztása
+        zscoreRef.current.freeze();
+
+        if (mountedRef.current && versionRef.current === version) {
+          // Explicit normStats frissítés a freeze után
+          setNormStats({ ...zscoreRef.current.stats });
           connectWebSocket(symbol);
         }
       } catch (err) {
-        if (mountedRef.current) {
+        if (mountedRef.current && versionRef.current === version) {
           setStatus('error');
           setError(`Bootstrap hiba: ${err.message}`);
         }

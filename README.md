@@ -5,7 +5,8 @@ Elo Bybit kriptovaluta-arfolyamok Kalman-szuressel torteno elemzese es harom val
 ## Funkcionalitas
 
 - **Elo adatforras**: Bybit perpetual futures 1 perces gyertya close arak WebSocket-en
-- **Z-score normalizalas**: rolling ablak (konfiguralhat meretu) atlagaval es szoras hely
+- **Z-score normalizalas**: a bootstrap adathalmazbol szamolt atlag es szoras befagyasztva (fix kalibracio), igy az elo arak trendjei megorzodnek
+- **Inverz z-score megjelenitese**: a Kalman-szuro z-score-okon dolgozik, de a charton es az info dobozokban az eredeti USDT arakat latjuk (visszaszamolva: `ar = z * std + mean`)
 - **Kalman-szuro**: 1D allapotter-modell (pozicio + sebesseg), inkrementalisan dolgozza fel a z-score meresi pontokat
 - **Harom eloszlas-nezet** egy rolling ablakon szamolva:
   - **PDF** (surusegfuggveny) — Gauss-gorbe a becslesi es meresi eloszlasra
@@ -13,6 +14,7 @@ Elo Bybit kriptovaluta-arfolyamok Kalman-szuressel torteno elemzese es harom val
   - **Karakterisztikus fuggveny** phi(t) — Fourier-transzformalt: Re, Im es amplitudo
 - **Interaktiv vezerles**: Q/R csuszkak, idolepesi slider, lejatszas/Live mod, eloszlas-ablak meret
 - **Coin valtas**: BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT, DOGEUSDT
+- **Ido-tengely**: az x-tengelyen 24 oras idoformatum (pl. 18:30)
 - **Automatikus reconnect**: exponencialis backoff + gap-detection REST catch-up-pal
 
 ## Elinditasa
@@ -41,13 +43,12 @@ kalman_pdf_cdf_char/
     lib/
       mathHelpers.js                normalPDF, normalCDF, charReal, charImag, charAbs
       kalmanFilter.js               Inkrementalis KalmanFilter1D osztaly
-      circularBuffer.js             Fix meretu ring buffer rolling mean/std-vel
-      zscore.js                     Z-score normalizer (CircularBuffer wrapper)
+      zscore.js                     Z-score normalizer (fix kalibracios modszer)
     components/
-      TimeSeriesChart.jsx           Idosor SVG chart (z-score + Kalman vonal)
+      TimeSeriesChart.jsx           Idosor SVG chart (USDT arak + Kalman vonal + ido x-tengely)
       DistChart.jsx                 PDF/CDF/Char.fv. SVG chart
       ControlPanel.jsx              Q/R sliderek, lepes slider, Live mod
-      StateInfo.jsx                 Becsles/meres/innovacio info dobozok
+      StateInfo.jsx                 Becsles/meres/innovacio info dobozok (USDT arban)
       ConnectionStatus.jsx          WS statusz + coin dropdown
       ExplanationPanel.jsx          Magyar nyelvu leiras
 ```
@@ -55,27 +56,31 @@ kalman_pdf_cdf_char/
 ## Adat-pipeline
 
 ```
-Bybit REST (N gyertya bootstrap)
+Bybit REST (240 gyertya bootstrap)
+         |
+         v
+    Raw close arak
+         |
+         v
+  ZScoreNormalizer.calibrate()  -->  mean, std kiszamitasa
+         |
+         v
+  ZScoreNormalizer.freeze()     -->  mean/std befagyasztasa
          |
 Bybit WS (kline.1.SYMBOL, confirm=true)
          |
          v
-    Raw close ar
+  ZScoreNormalizer.update()     -->  z = (close - frozen_mean) / frozen_std
          |
          v
-  CircularBuffer(N) --> rolling mean, std
+  KalmanFilter1D.update(z)     -->  {mu, sigma, filtered}
          |
          v
-    z = (close - mean) / std
+  history[] --> React state
          |
-         v
-  KalmanFilter1D.update(z) --> {mu, sigma, filtered}
-         |
-         v
-  history[] --> React state --> SVG rendereles
-         |
-         v
-  Rolling distWindow statisztika --> PDF / CDF / Char.fv. chartok
+         +-->  Inverz z-score (ar = z * std + mean)  -->  TimeSeriesChart (USDT)
+         +-->  Inverz z-score                         -->  StateInfo (USDT)
+         +-->  Rolling distWindow statisztika          -->  PDF / CDF / Char.fv. chartok
 ```
 
 ## Konfiguracio
@@ -85,16 +90,16 @@ Bybit WS (kline.1.SYMBOL, confirm=true)
 `src/hooks/useBybitData.js` 9. sor:
 
 ```js
-const DEFAULT_WINDOW = 100; // alapertelmezet bootstrap meret
+const DEFAULT_WINDOW = 4*60; // 240 perc = 4 ora
 ```
 
 Vagy az `App.jsx`-bol parameterkent:
 
 ```js
-useBybitData(symbol, Q, R, 240) // 240 perc = 4 ora
+useBybitData(symbol, Q, R, 120) // 120 perc = 2 ora
 ```
 
-A Bybit API maximum 1000 gyertyat ad vissza egy keresben.
+A bootstrap adat egyben a z-score kalibracios ablak: ebbol szamolodik az atlag es szoras, ami utana befagy. A Bybit API maximum 1000 gyertyat ad vissza egy keresben.
 
 ### Kalman-szuro parameterek
 
@@ -102,7 +107,7 @@ Az UI-ban csuszkakkal allithato:
 
 | Parameter | Leiras | Tartomany |
 |-----------|--------|-----------|
-| **Q** (folyamatzaj) | Modell-bizonytalansag. Kisebb Q = a szuro jobban bízik a modellben. | 0.01 - 2.0 |
+| **Q** (folyamatzaj) | Modell-bizonytalansag. Kisebb Q = a szuro jobban bizik a modellben. | 0.01 - 2.0 |
 | **R** (meresi zaj) | Szenzor-zaj. Nagyobb R = a szuro kevesbe bizik a meresekben. | 0.1 - 8.0 |
 
 Q/R valtoztatasa az egesz history-t ujrafuttatja a szuron (rerunAll).
@@ -122,7 +127,7 @@ A projekt ket Bybit v5 publikus endpointot hasznal (nincs szukseg API kulcsra):
 
 ### WebSocket elet-ciklus
 
-1. Bootstrap: REST-tel N gyertya letoltese
+1. Bootstrap: REST-tel N gyertya letoltese + z-score kalibracio befagyasztasa
 2. WS csatlakozas + feliratkozas: `kline.1.{SYMBOL}`
 3. 20 masodperces ping keep-alive
 4. Csak lezart gyertyakat (`confirm: true`) dolgoz fel a Kalman-szuro
@@ -139,7 +144,7 @@ A projekt ket Bybit v5 publikus endpointot hasznal (nincs szukseg API kulcsra):
 - **CSS-in-JS** — inline stilusok, nincs kulon CSS fajl
 - **IBM Plex Mono + Source Serif 4** — Google Fonts
 
-Nulla runtime fuggoseg a React-en kívul.
+Nulla runtime fuggoseg a React-en kivul.
 
 ## Matematikai hatter
 
@@ -153,13 +158,26 @@ Allapotter-modell: `x = [pozicio, sebesseg]^T`
 - **Frissitesi lepes**: Kalman-gain `K = P_pred * H^T / (H * P_pred * H^T + R)`, innovacio `y = z - H * x_pred`
 - **Eredmeny**: Gauss-eloszlas N(mu, sigma^2) minden idolepesben
 
-### Z-score normalizalas
+### Z-score normalizalas (fix kalibracio)
 
 ```
-z_i = (close_i - mean_window) / std_window
+Kalibracios fazis (bootstrap):
+  mean, std = a teljes bootstrap adathalmaz atlaga es szorasa
+  freeze() -> mean es std tobbe nem valtozik
+
+Elo fazis (WS):
+  z_i = (close_i - frozen_mean) / frozen_std
 ```
 
-A `CircularBuffer` Welford-modszerrel O(1) inkrementalisan szamolja a rolling atlagot es szorast.
+Ez a megkozelites megorizni a trendeket: ha az arfolyam esik, a z-score ertekek egyre kisebbek lesznek (nem torzul el a folyamatosan valtozo atlag altal).
+
+### Inverz z-score (megjelenittes)
+
+```
+ar_i = z_i * frozen_std + frozen_mean
+```
+
+A charton es az info dobozokban az eredeti USDT arak lathatoak. A Kalman-szuro belsejeben z-score-ok futnak, de a felhasznalo szamara atlathatoan arfolyamot mutatunk.
 
 ### Eloszlas-vizualizaciok (rolling ablakon)
 
