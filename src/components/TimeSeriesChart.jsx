@@ -3,7 +3,7 @@ import { useMemo } from 'react';
 const MONO = "'IBM Plex Mono',monospace";
 const SERIF = "'Source Serif 4',Georgia,serif";
 
-export default function TimeSeriesChart({ history, step, width, height, symbol }) {
+export default function TimeSeriesChart({ history, step, width, height, symbol, distWindow = 30 }) {
   const N = history.length;
   if (N === 0) return null;
 
@@ -49,10 +49,28 @@ export default function TimeSeriesChart({ history, step, width, height, symbol }
   for (let y = Math.ceil(yMin / yStep) * yStep; y <= yMax; y += yStep) yTicks.push(Math.round(y * 100) / 100);
 
   const clampedStep = Math.min(step, N - 1);
+  const winStart = Math.max(0, clampedStep + 1 - distWindow);
+
+  // Build separate line segments for inside/outside window
+  const buildLineRange = (arr, from, to) => {
+    let d = '';
+    for (let i = from; i <= to; i++) {
+      d += `${i === from ? 'M' : 'L'} ${toSX(i)} ${toSY(arr[i])} `;
+    }
+    return d;
+  };
 
   return (
     <svg width={width} height={height} style={{ overflow: 'visible' }}>
       {yTicks.map(y => <line key={y} x1={pad.left} x2={pad.left + cw} y1={toSY(y)} y2={toSY(y)} stroke="#1e1e30" strokeWidth={0.5} />)}
+
+      {/* Distribution window background highlight */}
+      <rect
+        x={toSX(winStart)} y={pad.top}
+        width={toSX(clampedStep) - toSX(winStart)}
+        height={ch}
+        fill="#22d3ee" opacity={0.04} rx={2}
+      />
 
       {/* Confidence band */}
       <path d={bandPath} fill="#00b4d8" opacity={0.08} />
@@ -63,9 +81,18 @@ export default function TimeSeriesChart({ history, step, width, height, symbol }
           fill={i <= clampedStep ? '#e85d0480' : '#e85d0420'} />
       ))}
 
-      {/* Filtered line */}
-      <path d={buildLine(filteredPositions, clampedStep + 1)} fill="none"
-        stroke="#00b4d8" strokeWidth={2.2} strokeLinecap="round" />
+      {/* Filtered line: outside window (dimmed) */}
+      {winStart > 0 && (
+        <path d={buildLineRange(filteredPositions, 0, winStart)} fill="none"
+          stroke="#00b4d8" strokeWidth={1.5} strokeLinecap="round" opacity={0.2} />
+      )}
+      {/* Filtered line: inside window (bright) */}
+      <path d={buildLineRange(filteredPositions, winStart, clampedStep)} fill="none"
+        stroke="#00b4d8" strokeWidth={2.5} strokeLinecap="round" />
+
+      {/* Window start marker */}
+      <line x1={toSX(winStart)} x2={toSX(winStart)} y1={pad.top} y2={pad.top + ch}
+        stroke="#22d3ee30" strokeWidth={1} strokeDasharray="4,3" />
 
       {/* Current step marker */}
       <line x1={toSX(clampedStep)} x2={toSX(clampedStep)} y1={pad.top} y2={pad.top + ch}

@@ -167,7 +167,7 @@ export default function App() {
               background: '#0d0d1c90', borderRadius: 12,
               border: '1px solid #1a1a30', padding: '6px 2px 2px',
             }}>
-              <TimeSeriesChart history={history} step={clampedStep} width={920} height={220} symbol={symbol} />
+              <TimeSeriesChart history={history} step={clampedStep} width={920} height={220} symbol={symbol} distWindow={distWindow} />
             </div>
 
             {/* Controls */}
